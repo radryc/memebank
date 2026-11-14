@@ -10,17 +10,18 @@ automatically.
 
 ## Deploy
 
-The repository and partition are registered once:
+The partition is auto-discovered from the ingested repository. No Guardian
+repo registration is required:
 
 ```bash
 monofs-admin ingest --router 127.0.0.1:9090 \
   --source https://github.com/radryc/memebank --ref main \
   --fetch-type git --replicate-data --token "$MONOFS_TOKEN"
-
-guardianctl --monofs-router 127.0.0.1:9090 --monofs-token "$MONOFS_TOKEN" \
-  repo add --name memebank --pusher k8s-main --partition memebank \
-  --source https://github.com/radryc/memebank.git
 ```
+
+Guardian's repo-import watcher scans `/.repos` for `guardian/partitions/**` and
+imports/reconciles new or changed bundles automatically. MonoFS auto-refresh
+pulls future `main` commits, so after the first ingest a `git push` is enough.
 
 The partition targets the `k8s-main` pusher and exposes the app through
 `lb-edge` on external port **8088** (service annotations in
