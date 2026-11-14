@@ -17,4 +17,3 @@ spec:
         registry: registry.strata.local:5000
         repository: memebank
         sourceImage: registry.strata.local:5000/memebank:58740ee
-        observeExisting: true
