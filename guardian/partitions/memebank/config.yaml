@@ -29,3 +29,4 @@ spec:
     topology: kubernetes
     managedBy: guardian
     owner: memebank@example.com
+    watcher: autodiscovery
