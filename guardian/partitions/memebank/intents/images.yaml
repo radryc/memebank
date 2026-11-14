@@ -1,0 +1,20 @@
+apiVersion: guardian/v1alpha1
+kind: Intent
+metadata:
+  name: images
+spec:
+  intentType: standard
+  targetPusher: k8s-main
+  target:
+    cluster: k8s-main
+    namespace: memebank
+  locked: false
+  assets:
+    - type: ImageBuild
+      name: memebank-build
+      version: "58740ee"
+      properties:
+        registry: registry.strata.local:5000
+        repository: memebank
+        sourceImage: registry.strata.local:5000/memebank:58740ee
+        observeExisting: true

@@ -1,0 +1,61 @@
+apiVersion: guardian/v1alpha1
+kind: Intent
+metadata:
+  name: app
+spec:
+  intentType: standard
+  joins: [images]
+  targetPusher: k8s-main
+  target:
+    cluster: k8s-main
+    namespace: memebank
+  locked: false
+  assets:
+    - type: Volume
+      name: memebank-data
+      properties:
+        accessMode: ReadWriteOnce
+        size: 2Gi
+    - type: Compute
+      name: memebank
+      dependsOn: [memebank-data]
+      payload:
+        k8s: /partitions/memebank/payloads/memebank.k8s.yaml
+      properties:
+        image: ${intent.images.outputs.memebank-build.imageRef}
+        imagePullPolicy: IfNotPresent
+        env:
+          MEMEBANK_ADDR: ":8080"
+          MEMEBANK_DATA: /data
+          MEMEBANK_STATIC: /app/web/dist
+          OTEL_SERVICE_NAME: memebank.app.memebank
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://k8s-svc-compute-k8s-main-otel-opentelemetry-collector-collector.otel.svc.cluster.local:4318
+          OTEL_RESOURCE_ATTRIBUTES: service.namespace=memebank,guardian.partition=memebank,guardian.intent=app,guardian.asset=memebank,guardian.asset.type=Compute,guardian.identity.kind=managed,guardian.provider=kubernetes
+          OTEL_PROPAGATORS: tracecontext,baggage
+          OTEL_TRACES_SAMPLER: parentbased_always_on
+        ports:
+          - containerPort: 8080
+            name: http
+            protocol: TCP
+            servicePort: 8080
+        volumeMounts:
+          - volume: memebank-data
+            path: /data
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 96Mi
+    - type: Probe
+      name: memebank-health
+      dependsOn: [memebank]
+      properties:
+        target: memebank
+        type: http
+        path: /api/health
+        port: 8080
+        interval: 30s
+        timeout: 3s
+        retries: 2

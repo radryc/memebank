@@ -1,0 +1,4 @@
+serviceAnnotations:
+  guardian.intent/expose: "true"
+  guardian.intent/service-name: memebank
+  guardian.intent/external-port: "8088"
