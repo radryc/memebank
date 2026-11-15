@@ -56,12 +56,18 @@ GitHub review ownership is declared in [`.github/CODEOWNERS`](../../../.github/C
 
 ## Image updates
 
-After changing application code, run:
+No local checkout, image build, or image pin is required. The partition uses a
+MonoFS-backed `ImageBuild`:
 
-```bash
-./scripts/release-image.sh
+```yaml
+buildSource: /.repos/github.com/radryc/memebank
+dockerfile: Dockerfile
 ```
 
-It builds and pushes `registry.strata.local:5000/memebank:<git-sha>` and updates
-`intents/images.yaml`. Commit and push that change; the watcher rebuilds the
-Guardian partition and rolls the deployment.
+MonoFS projects this repository at `/.repos/github.com/radryc/memebank`, and
+Guardian's k8s pusher builds and pushes the image from that source revision.
+The image tag is the source commit, so a new commit produces a new image and a
+new release automatically.
+
+`./scripts/release-image.sh` remains available for local, out-of-band builds,
+but it is not part of the normal deploy path.

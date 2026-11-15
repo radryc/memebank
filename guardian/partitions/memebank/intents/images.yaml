@@ -12,8 +12,12 @@ spec:
   assets:
     - type: ImageBuild
       name: memebank-build
-      version: "471e5e9"
+      version: auto
       properties:
+        # Guardian's k8s pusher builds this from the MonoFS projection of the
+        # repository. The image tag is the source commit, so a new commit is a
+        # new image and a new release without a local checkout or pin update.
+        buildSource: /.repos/github.com/radryc/memebank
+        dockerfile: Dockerfile
         registry: registry.strata.local:5000
         repository: memebank
-        sourceImage: registry.strata.local:5000/memebank:471e5e9
