@@ -29,16 +29,16 @@ The partition targets the `k8s-main` pusher and exposes the app through
 
 ## Access
 
-Runtime authorization is **not** defined in this repository. Guardian has no
-per-repository RBAC file: the repo-import loop only imports
-`guardian/partitions/<name>/` manifests, payloads, and intents. Access is
-decided by the platform ACL in `strata/access` (or the demo ACL in
-`strata/demo-divisions/policy`), where `ryckor@example.com` is granted the
-`admin` role on the `memebank` partition, logs, traces, and repo:
+The partition owns its RBAC in [`access.yaml`](access.yaml). Guardian imports
+this file with the partition bundle, validates that every grant is scoped to
+`memebank`, and merges it into the compiled access policy automatically. The
+current grant makes `radryc@example.com` an admin on the partition, its logs and
+traces, and the `github.com/*/memebank` repository:
 
 ```yaml
+version: 1
 users:
-  ryckor@example.com:
+  radryc@example.com:
     partitions: [memebank]
     logs: [memebank]
     traces: [memebank]
@@ -46,7 +46,13 @@ users:
     role: admin
 ```
 
-The `owner` label in `config.yaml` is informational; it does not grant access.
+Repo-owned ACLs are deliberately narrow. Imports, defaults, selectors, quotas,
+`aws_bindings`, clients, deny rules, wildcards, other partitions, and monofs
+paths outside this repository are rejected by the importer. The platform ACL
+remains the authority for platform-wide grants and defaults.
+
+GitHub review ownership is declared in [`.github/CODEOWNERS`](../../../.github/CODEOWNERS)
+(`* @radryc`). The `owner` label in `config.yaml` is informational.
 
 ## Image updates
 

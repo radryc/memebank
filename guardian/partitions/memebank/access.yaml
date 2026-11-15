@@ -1,0 +1,15 @@
+# Partition-scoped RBAC for memebank.
+#
+# Guardian imports this file with the partition bundle and merges it into the
+# compiled access policy. Every scope must name this partition; monofs patterns
+# must resolve to the owning repository. Grants outside those bounds are
+# rejected by the importer.
+version: 1
+users:
+  radryc@example.com:
+    partitions: [memebank]
+    logs: [memebank]
+    traces: [memebank]
+    monofs:
+      - github.com/*/memebank
+    role: admin
