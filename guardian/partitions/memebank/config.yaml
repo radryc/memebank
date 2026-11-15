@@ -6,6 +6,14 @@ metadata:
     role: demo
     component: memebank
 spec:
+  # Quota size class. Built-in classes ("small", "small-plus", "medium",
+  # "medium-plus", "large", "xlarge") ship with predefined ingest/query/storage
+  # envelopes, so a partition only needs to name the class it belongs to.
+  # Start in observe mode, watch `doctor-ingest` quota logs, then switch to
+  # `enforce` once the limits fit the workload.
+  quota:
+    profile: small
+    enforcement: observe
   defaults:
     observability:
       enabled: true
