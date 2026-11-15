@@ -51,6 +51,70 @@ func TestRenderAddsCaptions(t *testing.T) {
 	}
 }
 
+func TestRenderHonorsCaptionLayout(t *testing.T) {
+	src := image.NewRGBA(image.Rect(0, 0, 400, 400))
+	for y := 0; y < 400; y++ {
+		for x := 0; x < 400; x++ {
+			src.SetRGBA(x, y, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+		}
+	}
+
+	// A red caption centred on (100,100) at 12% of the canvas width.
+	out, err := Render(src, "HI", "", ParseStyle(`{"color":"#ff0000","outline":false,"top":{"x":0.25,"y":0.25,"size":0.12}}`))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	img, err := png.Decode(bytes.NewReader(out))
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+
+	red := 0
+	for y := 50; y < 150; y++ {
+		for x := 50; x < 150; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			if r > 0xf000 && g < 0x3000 && b < 0x3000 {
+				red++
+			}
+		}
+	}
+	if red == 0 {
+		t.Fatal("positioned caption was not drawn at its requested location")
+	}
+
+	// The default top edge should stay untouched because the caption moved.
+	for y := 0; y < 40; y++ {
+		for x := 0; x < 400; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			if r < 0xf000 || g < 0xf000 || b < 0xf000 {
+				t.Fatalf("caption leaked into the top edge at (%d,%d)", x, y)
+			}
+		}
+	}
+}
+
+func TestStyleCaptionLayoutClamping(t *testing.T) {
+	if got := ParseStyle(`{}`).Top; got != nil {
+		t.Fatalf("default layout = %+v, want nil", got)
+	}
+	if got := ParseStyle(`{"bottom":{"x":0,"y":0,"size":0}}`).Bottom; got != nil {
+		t.Fatalf("empty layout = %+v, want nil", got)
+	}
+
+	style := ParseStyle(`{"top":{"x":-2,"y":5,"size":4}}`)
+	if style.Top == nil {
+		t.Fatal("expected a top layout")
+	}
+	if style.Top.X != 0 || style.Top.Y != 1 || style.Top.Size != maxCaptionSize {
+		t.Fatalf("clamped layout = %+v", style.Top)
+	}
+
+	custom := ParseStyle(`{"bottom":{"x":0.5,"y":0.25,"size":0.1}}`)
+	if custom.Bottom == nil || custom.Bottom.X != 0.5 || custom.Bottom.Y != 0.25 || custom.Bottom.Size != 0.1 {
+		t.Fatalf("custom layout = %+v", custom.Bottom)
+	}
+}
+
 func TestStyleDefaults(t *testing.T) {
 	style := ParseStyle("")
 	if style.FontScale != 1 || style.Color != "#ffffff" || !style.Uppercase || !style.Outline {

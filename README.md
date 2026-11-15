@@ -10,7 +10,7 @@ Built with **Go** (net/http + SQLite) and **React/TypeScript** (Vite + Tailwind 
 
 - **Template library** seeded from the Imgflip public API (72 classics, with Change My Mind aliased as Convince Me for search), plus handpicked additions (Facepalm, Young Thug at Computer, First World Problems, Elon Musk…) and generated blank canvases.
 - **Animated GIF templates** — generated animated canvases out of the box, GIF uploads, animated previews, and real animated GIF memes.
-- **Meme editor** with live canvas preview, top/bottom captions, font scaling, text colours, outline/uppercase toggles, random caption generator, PNG/GIF export.
+- **Meme editor** with live canvas preview, top/bottom captions, drag-to-position captions with per-caption resizing, font scaling, text colours, outline/uppercase toggles, random caption generator, PNG/GIF export.
 - **Upload or paste (⌘V / Ctrl+V) images and GIFs** and immediately use them as templates; uploads join the community library.
 - **Duplicate-proof uploads** — templates are fingerprinted with SHA-256 and a 256-bit perceptual dHash. The same file, a resized copy, or a re-encoded version all reuse the existing template instead of cluttering the library.
 - **Scoring** with optimistic up/down votes, one vote per browser per meme, vote toggling, hot/new/top sorting, and a full leaderboard.

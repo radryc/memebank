@@ -31,6 +31,15 @@ var antonTTF []byte
 
 const maxRenderSide = 1600
 
+// CaptionLayout places one caption block on the canvas. Every value is
+// relative to the canvas size so the browser preview and the server render
+// stay aligned at any resolution.
+type CaptionLayout struct {
+	X    float64 `json:"x"`    // centre of the block, 0..1 of canvas width
+	Y    float64 `json:"y"`    // vertical centre of the block, 0..1 of canvas height
+	Size float64 `json:"size"` // font size as a fraction of canvas width
+}
+
 // Style mirrors the JSON stored in memes.style.
 type Style struct {
 	FontScale float64 `json:"fontScale"`
@@ -38,7 +47,17 @@ type Style struct {
 	Stroke    string  `json:"stroke"`
 	Uppercase bool    `json:"uppercase"`
 	Outline   bool    `json:"outline"`
+	// Top and Bottom are optional. When nil the classic top/bottom layout is
+	// used; when set, the caption is drawn at the user's position and size.
+	Top    *CaptionLayout `json:"top,omitempty"`
+	Bottom *CaptionLayout `json:"bottom,omitempty"`
 }
+
+const (
+	defaultCaptionSize = 0.095
+	minCaptionSize     = 0.02
+	maxCaptionSize     = 0.30
+)
 
 // ParseStyle applies the same defaults as the client renderer.
 func ParseStyle(raw string) Style {
@@ -63,7 +82,44 @@ func ParseStyle(raw string) Style {
 	if !validHex(style.Stroke) {
 		style.Stroke = "#000000"
 	}
+	style.Top = sanitizeCaptionLayout(style.Top)
+	style.Bottom = sanitizeCaptionLayout(style.Bottom)
 	return style
+}
+
+// sanitizeCaptionLayout clamps client-supplied positions and sizes so a
+// hand-crafted style JSON cannot push text off the canvas or use absurd sizes.
+func sanitizeCaptionLayout(layout *CaptionLayout) *CaptionLayout {
+	if layout == nil {
+		return nil
+	}
+	if layout.X == 0 && layout.Y == 0 && layout.Size == 0 {
+		return nil
+	}
+	out := *layout
+	if math.IsNaN(out.X) || math.IsInf(out.X, 0) {
+		out.X = 0.5
+	}
+	if math.IsNaN(out.Y) || math.IsInf(out.Y, 0) {
+		out.Y = 0.5
+	}
+	if math.IsNaN(out.Size) || math.IsInf(out.Size, 0) || out.Size <= 0 {
+		out.Size = defaultCaptionSize
+	}
+	out.X = clampFloat(out.X, 0, 1)
+	out.Y = clampFloat(out.Y, 0, 1)
+	out.Size = clampFloat(out.Size, minCaptionSize, maxCaptionSize)
+	return &out
+}
+
+func clampFloat(value, low, high float64) float64 {
+	if value < low {
+		return low
+	}
+	if value > high {
+		return high
+	}
+	return value
 }
 
 var (
@@ -141,6 +197,16 @@ func scaleCanvas(src image.Image, maxSide int) *image.RGBA {
 	return dst
 }
 
+// captionBlock is one laid-out block of caption lines.
+type captionBlock struct {
+	lines      []string
+	size       float64
+	lineHeight float64
+	centerX    float64
+	topY       float64
+	height     float64
+}
+
 func drawCaptions(canvas *image.RGBA, topText, bottomText string, style Style) error {
 	upper := func(s string) string {
 		if style.Uppercase {
@@ -156,60 +222,159 @@ func drawCaptions(canvas *image.RGBA, topText, bottomText string, style Style) e
 
 	width := float64(canvas.Bounds().Dx())
 	height := float64(canvas.Bounds().Dy())
+	const lineHeightRatio = 1.08
 	maxWidth := width * 0.92
-	base := width * 0.095 * style.FontScale
-	minSize := math.Max(12, width*0.032)
-	lineHeightRatio := 1.08
+	pad := height * 0.028
 
-	size := math.Max(minSize, base)
-	var face font.Face
-	var topLines, bottomLines []string
-	for guard := 0; guard < 40; guard++ {
-		var err error
-		face, err = newFace(size)
+	base := width * defaultCaptionSize * style.FontScale
+	autoSize := fitCaptionSize(width, height, base, top, bottom, style)
+
+	fill := color.NRGBA(parseColor(style.Color))
+	stroke := color.NRGBA(parseColor(style.Stroke))
+
+	for _, spec := range []struct {
+		text   string
+		layout *CaptionLayout
+		isTop  bool
+	}{
+		{top, style.Top, true},
+		{bottom, style.Bottom, false},
+	} {
+		if spec.text == "" {
+			continue
+		}
+		size := autoSize
+		if spec.layout != nil {
+			size = spec.layout.Size * width
+		}
+		block, err := newCaptionBlock(spec.text, width, height, spec.layout, size, maxWidth, pad, lineHeightRatio, spec.isTop)
 		if err != nil {
 			return err
 		}
-		topLines = wrapText(top, face, maxWidth)
-		bottomLines = wrapText(bottom, face, maxWidth)
-		widest := 0.0
-		for _, line := range append(append([]string{}, topLines...), bottomLines...) {
-			if w := measure(face, line); w > widest {
-				widest = w
+		if err := drawCaptionBlock(canvas, block, fill, stroke, style.Outline); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// fitCaptionSize mirrors the browser auto-fit loop. Captions that have an
+// explicit layout opt out: their size belongs to the user.
+func fitCaptionSize(width, height, base float64, topText, bottomText string, style Style) float64 {
+	maxWidth := width * 0.92
+	minSize := math.Max(12, width*0.032)
+	const lineHeightRatio = 1.08
+	size := math.Max(minSize, base)
+	for guard := 0; guard < 40; guard++ {
+		face, err := newFace(size)
+		if err != nil {
+			return size
+		}
+		fits := true
+		check := func(text string, layout *CaptionLayout) {
+			if layout != nil || text == "" {
+				return
+			}
+			lines := wrapText(text, face, maxWidth)
+			if float64(len(lines))*size*lineHeightRatio > height*0.42 {
+				fits = false
+				return
+			}
+			for _, line := range lines {
+				if measure(face, line) > width*0.94 {
+					fits = false
+					return
+				}
 			}
 		}
-		topHeight := float64(len(topLines)) * size * lineHeightRatio
-		bottomHeight := float64(len(bottomLines)) * size * lineHeightRatio
-		if widest <= width*0.94 && topHeight <= height*0.42 && bottomHeight <= height*0.42 {
-			break
+		check(topText, style.Top)
+		check(bottomText, style.Bottom)
+		closeFace(face)
+		if fits {
+			return size
 		}
 		if size <= minSize {
-			break
+			return size
 		}
 		size = math.Max(minSize, size-math.Max(1, math.Round(size*0.055)))
 	}
-	if face == nil {
-		return fmt.Errorf("could not lay out text")
-	}
-	if closer, ok := face.(interface{ Close() error }); ok {
-		defer closer.Close()
-	}
+	return size
+}
 
-	lineHeight := size * 1.08
-	fill := color.NRGBA(parseColor(style.Color))
-	stroke := color.NRGBA(parseColor(style.Stroke))
-	pad := height * 0.028
+func newCaptionBlock(
+	text string,
+	width, height float64,
+	layout *CaptionLayout,
+	size, maxWidth, pad, lineHeightRatio float64,
+	isTop bool,
+) (*captionBlock, error) {
+	face, err := newFace(size)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFace(face)
+
+	lines := wrapText(text, face, maxWidth)
+	widest := 0.0
+	for _, line := range lines {
+		if w := measure(face, line); w > widest {
+			widest = w
+		}
+	}
+	blockHeight := float64(len(lines)) * size * lineHeightRatio
+	block := &captionBlock{
+		lines:      lines,
+		size:       size,
+		lineHeight: size * lineHeightRatio,
+		height:     blockHeight,
+	}
+	if layout != nil {
+		block.centerX, block.topY = clampCaptionBox(layout.X*width, layout.Y*height, widest, blockHeight, width, height)
+		return block, nil
+	}
+	block.centerX = width / 2
+	block.topY = pad
+	if !isTop {
+		block.topY = height - pad - blockHeight
+	}
+	return block, nil
+}
+
+// clampCaptionBox keeps a positioned block inside the canvas. It accepts the
+// block centre and returns the clamped horizontal centre plus the block top.
+func clampCaptionBox(centerX, centerY, blockWidth, blockHeight, width, height float64) (float64, float64) {
+	halfW := blockWidth / 2
+	if blockWidth >= width {
+		centerX = width / 2
+	} else {
+		centerX = clampFloat(centerX, halfW, width-halfW)
+	}
+	halfH := blockHeight / 2
+	if blockHeight >= height {
+		centerY = blockHeight / 2
+	} else {
+		centerY = clampFloat(centerY, halfH, height-halfH)
+	}
+	return centerX, centerY - halfH
+}
+
+func drawCaptionBlock(canvas *image.RGBA, block *captionBlock, fill, stroke color.NRGBA, outline bool) error {
+	face, err := newFace(block.size)
+	if err != nil {
+		return err
+	}
+	defer closeFace(face)
 	// Canvas positions text from the line box top, while Go's font ascent is
 	// much taller for Anton. This offset keeps server renders aligned with the
 	// live editor preview.
-	baselineOffset := size * 0.78
+	firstBaseline := block.topY + block.size*0.78
+	return drawBlock(canvas, face, block.lines, block.centerX, firstBaseline, block.lineHeight, fill, stroke, outline, block.size)
+}
 
-	topBase := pad + baselineOffset
-	bottomBase := height - pad - float64(len(bottomLines))*lineHeight + baselineOffset
-	if err := drawBlock(canvas, face, topLines, width/2, topBase, lineHeight, fill, stroke, style.Outline, size); err != nil {
-		return err
+func closeFace(face font.Face) {
+	if closer, ok := face.(interface{ Close() error }); ok {
+		_ = closer.Close()
 	}
-	return drawBlock(canvas, face, bottomLines, width/2, bottomBase, lineHeight, fill, stroke, style.Outline, size)
 }
 
 func drawBlock(

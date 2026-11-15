@@ -1,9 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
-import type { MemeStyle, Template } from '../lib/types'
+import type { CaptionLayout, MemeStyle, Template } from '../lib/types'
 import { DEFAULT_STYLE, parseStyle } from '../lib/types'
 import { createMeme, fetchTemplates, uploadTemplate } from '../lib/api'
-import { canvasToBlob, ensureFonts, loadImage, renderMeme } from '../lib/memeCanvas'
+import {
+  canvasToBlob,
+  clampCaptionSize,
+  ensureFonts,
+  layoutCaptions,
+  loadImage,
+  renderMeme,
+  type CaptionBlock,
+} from '../lib/memeCanvas'
 import { renderGifMeme } from '../lib/gifMeme'
 import { imageFromClipboard } from '../lib/clipboard'
 import { cn } from '../lib/utils'
@@ -55,6 +70,15 @@ const randomCaptions: [string, string][] = [
   ['my 5-year plan', 'a nap'],
 ]
 
+type CaptionSlot = 'top' | 'bottom'
+
+interface CaptionLayoutState {
+  top: CaptionBlock | null
+  bottom: CaptionBlock | null
+  width: number
+  height: number
+}
+
 export default function CreatePage() {
   const navigate = useNavigate()
   const location = useLocation()
@@ -98,6 +122,9 @@ export default function CreatePage() {
       ? 'A visually identical template was already in the library — using the existing one.'
       : 'That image was already in the library — the existing template is selected.'
   })
+
+  const [captionLayout, setCaptionLayout] = useState<CaptionLayoutState | null>(null)
+  const [selectedCaption, setSelectedCaption] = useState<CaptionSlot | null>(null)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -187,13 +214,32 @@ export default function CreatePage() {
 
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!image || !canvas) return
-    if (!animated) {
-      renderMeme(canvas, image, topText, bottomText, style)
+    if (!canvas) return
+    if (!image) {
+      setCaptionLayout(null)
       return
     }
+
+    const refreshBoxes = () => {
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      setCaptionLayout({
+        ...layoutCaptions(ctx, topText, bottomText, canvas.width, canvas.height, style),
+        width: canvas.width,
+        height: canvas.height,
+      })
+    }
+
+    if (!animated) {
+      renderMeme(canvas, image, topText, bottomText, style)
+      refreshBoxes()
+      return
+    }
+
     // GIF templates animate in the browser; redraw the current frame often
     // enough to preview the motion without burning a full 60fps.
+    renderMeme(canvas, image, topText, bottomText, style)
+    refreshBoxes()
     let raf = 0
     let last = 0
     const tick = (time: number) => {
@@ -254,6 +300,150 @@ export default function CreatePage() {
     const [top, bottom] = randomCaptions[Math.floor(Math.random() * randomCaptions.length)]
     setTopText(top)
     setBottomText(bottom)
+  }
+
+  /**
+   * Layout a drag should start from. The painted box wins over the stored
+   * spec because the renderer clamps blocks to the canvas, and the overlay
+   * always shows the clamped position.
+   */
+  const currentCaptionLayout = (slot: CaptionSlot): CaptionLayout | null => {
+    if (!captionLayout || !captionLayout.width || !captionLayout.height) return null
+    const box = captionLayout[slot]
+    if (!box) return null
+    return {
+      x: box.centerX / captionLayout.width,
+      y: (box.topY + box.height / 2) / captionLayout.height,
+      size: box.size / captionLayout.width,
+    }
+  }
+
+  const setCaptionLayoutFor = (slot: CaptionSlot, layout: CaptionLayout) => {
+    setStyle((prev) => {
+      const next: MemeStyle = { ...prev }
+      next[slot] = layout
+      return next
+    })
+  }
+
+  const beginCaptionDrag = (
+    kind: 'move' | 'resize',
+    slot: CaptionSlot,
+    event: ReactPointerEvent<HTMLElement>,
+  ) => {
+    const canvas = canvasRef.current
+    const layoutState = captionLayout
+    const box = layoutState?.[slot]
+    const start = currentCaptionLayout(slot)
+    if (!canvas || !layoutState || !box || !start) return
+    const rect = canvas.getBoundingClientRect()
+    if (!rect.width || !rect.height) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedCaption(slot)
+
+    const startClientX = event.clientX
+    const startClientY = event.clientY
+    const centerX = start.x * layoutState.width
+    const centerY = start.y * layoutState.height
+    const startDistance = Math.max(
+      1,
+      Math.hypot(
+        ((startClientX - rect.left) / rect.width) * layoutState.width - centerX,
+        ((startClientY - rect.top) / rect.height) * layoutState.height - centerY,
+      ),
+    )
+    // Keep the painted box inside the canvas while dragging.
+    const halfW = box.width / layoutState.width / 2
+    const halfH = box.height / layoutState.height / 2
+    const minX = Math.min(0.5, halfW)
+    const maxX = Math.max(0.5, 1 - halfW)
+    const minY = Math.min(0.5, halfH)
+    const maxY = Math.max(0.5, 1 - halfH)
+
+    const onMove = (moveEvent: PointerEvent) => {
+      if (kind === 'move') {
+        const dx = (moveEvent.clientX - startClientX) / rect.width
+        const dy = (moveEvent.clientY - startClientY) / rect.height
+        setCaptionLayoutFor(slot, {
+          ...start,
+          x: Math.min(maxX, Math.max(minX, start.x + dx)),
+          y: Math.min(maxY, Math.max(minY, start.y + dy)),
+        })
+        return
+      }
+      const pointerX = ((moveEvent.clientX - rect.left) / rect.width) * layoutState.width
+      const pointerY = ((moveEvent.clientY - rect.top) / rect.height) * layoutState.height
+      const distance = Math.hypot(pointerX - centerX, pointerY - centerY)
+      setCaptionLayoutFor(slot, {
+        ...start,
+        size: clampCaptionSize(start.size * (distance / startDistance)),
+      })
+    }
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+  }
+
+  const nudgeCaption = (slot: CaptionSlot, event: ReactKeyboardEvent<HTMLElement>) => {
+    const start = currentCaptionLayout(slot)
+    if (!start) return
+    const step = event.shiftKey ? 0.02 : 0.005
+    let dx = 0
+    let dy = 0
+    switch (event.key) {
+      case 'ArrowLeft':
+        dx = -step
+        break
+      case 'ArrowRight':
+        dx = step
+        break
+      case 'ArrowUp':
+        dy = -step
+        break
+      case 'ArrowDown':
+        dy = step
+        break
+      default:
+        return
+    }
+    event.preventDefault()
+    setCaptionLayoutFor(slot, {
+      ...start,
+      x: Math.min(1, Math.max(0, start.x + dx)),
+      y: Math.min(1, Math.max(0, start.y + dy)),
+    })
+  }
+
+  const resetCaptionLayout = (slot: CaptionSlot) => {
+    setStyle((prev) => {
+      const next: MemeStyle = { ...prev }
+      delete next[slot]
+      return next
+    })
+    setSelectedCaption(null)
+  }
+
+  const resetAllCaptionLayout = () => {
+    setStyle((prev) => {
+      const next: MemeStyle = { ...prev }
+      delete next.top
+      delete next.bottom
+      return next
+    })
+    setSelectedCaption(null)
+  }
+
+  const clearCaptions = () => {
+    setTopText('')
+    setBottomText('')
+    resetAllCaptionLayout()
   }
 
   const downloadDraft = async () => {
@@ -320,6 +510,74 @@ export default function CreatePage() {
     }
   }
 
+  const captionOverlays =
+    image && !imageLoading && captionLayout
+      ? (['top', 'bottom'] as const).map((slot) => {
+          const box = captionLayout[slot]
+          if (!box) return null
+          // Give small captions a comfortable grab area without moving them.
+          const minWidth = captionLayout.width * 0.05
+          const minHeight = captionLayout.height * 0.04
+          const boxWidth = Math.max(box.width, minWidth)
+          const boxHeight = Math.max(box.height, minHeight)
+          const left = ((box.centerX - boxWidth / 2) / captionLayout.width) * 100
+          const top = ((box.topY - (boxHeight - box.height) / 2) / captionLayout.height) * 100
+          const selected = selectedCaption === slot
+          return (
+            <div
+              key={slot}
+              role="button"
+              tabIndex={0}
+              aria-label={`${slot} caption — drag to move, arrow keys to nudge`}
+              onPointerDown={(event) => beginCaptionDrag('move', slot, event)}
+              onKeyDown={(event) => nudgeCaption(slot, event)}
+              className={cn(
+                'absolute cursor-move touch-none rounded-md border-2 border-dashed outline-none transition-colors',
+                selected
+                  ? 'border-acid-400 bg-acid-400/[0.07]'
+                  : 'border-white/25 hover:border-white/70 focus-visible:border-acid-400',
+              )}
+              style={{
+                left: `${left}%`,
+                top: `${top}%`,
+                width: `${(boxWidth / captionLayout.width) * 100}%`,
+                height: `${(boxHeight / captionLayout.height) * 100}%`,
+              }}
+            >
+              {selected && (
+                <>
+                  <span className="pointer-events-none absolute -top-5 left-1/2 -translate-x-1/2 rounded-full bg-ink-950/85 px-1.5 py-0.5 text-[8px] font-bold tracking-wider text-acid-300 uppercase">
+                    {slot}
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Reset ${slot} caption position`}
+                    title="Reset position and size"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      resetCaptionLayout(slot)
+                    }}
+                    className="absolute -top-2.5 -left-2.5 grid size-5 cursor-pointer place-items-center rounded-full border border-white/30 bg-ink-950/90 text-[11px] text-zinc-300 transition hover:border-white/60 hover:text-white"
+                  >
+                    ×
+                  </button>
+                </>
+              )}
+              <span
+                role="presentation"
+                title="Drag to resize"
+                onPointerDown={(event) => beginCaptionDrag('resize', slot, event)}
+                className={cn(
+                  'absolute -right-2 -bottom-2 size-4 cursor-nwse-resize rounded-full border-2 border-ink-950 shadow transition-colors',
+                  selected ? 'bg-acid-400' : 'bg-white/70',
+                )}
+              />
+            </div>
+          )
+        })
+      : null
+
   return (
     <div className="mx-auto max-w-[1240px] pb-10">
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -363,13 +621,23 @@ export default function CreatePage() {
 
             <div className="checker p-3 sm:p-5">
               <div className="relative mx-auto flex min-h-56 items-center justify-center overflow-hidden rounded-xl">
-                <canvas
-                  ref={canvasRef}
-                  className={cn(
-                    'mx-auto block h-auto max-h-[64vh] w-auto max-w-full rounded-xl transition-opacity duration-300',
-                    image && !imageLoading ? 'opacity-100' : 'opacity-0',
+                <div className="relative inline-block max-w-full align-middle">
+                  <canvas
+                    ref={canvasRef}
+                    className={cn(
+                      'mx-auto block h-auto max-h-[64vh] w-auto max-w-full rounded-xl transition-opacity duration-300',
+                      image && !imageLoading ? 'opacity-100' : 'opacity-0',
+                    )}
+                  />
+                  {captionOverlays && (
+                    <div
+                      className="absolute inset-0"
+                      onPointerDown={() => setSelectedCaption(null)}
+                    >
+                      {captionOverlays}
+                    </div>
                   )}
-                />
+                </div>
                 {(imageLoading || (!image && !imageError && templatesLoading)) && (
                   <div className="absolute inset-0 grid place-items-center bg-ink-950/40">
                     <Loader className="size-7 text-acid-400" />
@@ -405,22 +673,30 @@ export default function CreatePage() {
               <span>
                 {topText.length + bottomText.length} caption characters
               </span>
-              <button
-                type="button"
-                onClick={() => {
-                  setTopText('')
-                  setBottomText('')
-                }}
-                className="font-medium text-zinc-500 transition hover:text-zinc-200"
-              >
-                Clear captions
-              </button>
+              <span className="flex items-center gap-3">
+                {(style.top || style.bottom) && (
+                  <button
+                    type="button"
+                    onClick={resetAllCaptionLayout}
+                    className="font-medium text-zinc-500 transition hover:text-zinc-200"
+                  >
+                    Reset layout
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={clearCaptions}
+                  className="font-medium text-zinc-500 transition hover:text-zinc-200"
+                >
+                  Clear captions
+                </button>
+              </span>
             </div>
           </div>
           <p className="mt-3 text-center text-[11px] leading-relaxed text-zinc-600">
             {animated
-              ? 'Animated template — your captions get baked into every frame when you post.'
-              : 'Tip: short captions hit harder. Stretch the font with the size slider if it feels cramped.'}
+              ? 'Animated template — drag a caption box to move it, or its corner dot to resize. Your layout is baked into every frame when you post.'
+              : 'Drag a caption box to move it, or its corner dot to resize. Arrow keys nudge the selected caption.'}
           </p>
         </div>
 
@@ -607,9 +883,23 @@ export default function CreatePage() {
                 max={1.5}
                 step={0.05}
                 value={style.fontScale}
-                onChange={(event) =>
-                  setStyle((prev) => ({ ...prev, fontScale: Number(event.target.value) }))
-                }
+                onChange={(event) => {
+                  const nextScale = Number(event.target.value)
+                  setStyle((prev) => {
+                    // Keep manually placed captions proportional when the
+                    // global slider moves.
+                    const previous = prev.fontScale || 1
+                    const ratio = nextScale / previous
+                    const next: MemeStyle = { ...prev, fontScale: nextScale }
+                    for (const slot of ['top', 'bottom'] as const) {
+                      const layout = prev[slot]
+                      if (layout) {
+                        next[slot] = { ...layout, size: clampCaptionSize(layout.size * ratio) }
+                      }
+                    }
+                    return next
+                  })
+                }}
                 className="mt-2 w-full cursor-pointer"
                 aria-label="Font size"
               />
