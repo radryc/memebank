@@ -1,8 +1,8 @@
-// Package observability wires OpenTelemetry tracing and metrics into memebank
-// using the standard OTEL_* environment variables.
+// Package observability wires OpenTelemetry tracing, metrics and logs into
+// memebank using the standard OTEL_* environment variables.
 //
-// Traces and metrics are exported over OTLP/HTTP. Exporting is only enabled
-// when an OTLP endpoint is configured, so local development stays silent unless
+// All signals are exported over OTLP/HTTP. Exporting is only enabled when an
+// OTLP endpoint is configured, so local development stays on stdout unless
 // OTEL_EXPORTER_OTLP_ENDPOINT (or a signal-specific endpoint) is set.
 package observability
 
@@ -19,12 +19,15 @@ import (
 	"strings"
 
 	"github.com/XSAM/otelsql"
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -32,16 +35,20 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Setup configures the global OpenTelemetry tracer and meter providers from the
-// OTEL_* environment. It returns a shutdown function that flushes pending
-// telemetry; call it before the process exits. The returned function is always
-// safe to call, even when exporting is disabled.
-func Setup(ctx context.Context, version string) (func(context.Context) error, error) {
+// Setup configures the global OpenTelemetry tracer, meter and logger providers
+// from the OTEL_* environment. It returns a shutdown function that flushes
+// pending telemetry, plus the slog handler the application should log through.
+//
+// When logs are exported over OTLP the handler bridges slog into the OTel logs
+// SDK. Otherwise it falls back to text on stdout, which keeps local development
+// readable without a collector. The shutdown function is always safe to call,
+// even when exporting is disabled.
+func Setup(ctx context.Context, version string, level slog.Leveler) (func(context.Context) error, slog.Handler, error) {
 	log := slog.Default()
 
 	if disabled() {
 		log.Info("observability disabled by OTEL_SDK_DISABLED")
-		return noopShutdown, nil
+		return noopShutdown, stdoutLogHandler(level), nil
 	}
 
 	otel.SetTextMapPropagator(propagatorFromEnv(log))
@@ -51,10 +58,35 @@ func Setup(ctx context.Context, version string) (func(context.Context) error, er
 
 	res, err := buildResource(ctx, version)
 	if err != nil {
-		return nil, fmt.Errorf("build otel resource: %w", err)
+		return nil, nil, fmt.Errorf("build otel resource: %w", err)
 	}
 
 	var shutdowns []func(context.Context) error
+	var handler slog.Handler
+	var logShutdown func(context.Context) error
+
+	// Logs are configured first: once the caller installs handler, the setup
+	// messages below keep using the bootstrap logger on stdout/stderr.
+	if exporterEnabled("logs", log) {
+		exp, err := otlploghttp.New(ctx)
+		if err != nil {
+			log.Error("could not create OTLP log exporter", "error", err)
+		} else {
+			lp := sdklog.NewLoggerProvider(
+				sdklog.WithProcessor(sdklog.NewBatchProcessor(exp)),
+				sdklog.WithResource(res),
+			)
+			otel.SetLoggerProvider(lp)
+			// Shut the log provider down last so shutdown errors from the
+			// other signals can still be recorded.
+			logShutdown = lp.Shutdown
+			handler = otelslog.NewHandler(instrumentationName,
+				otelslog.WithLoggerProvider(lp),
+				otelslog.WithVersion(version),
+			)
+			log.Info("otlp logs enabled", "endpoint", endpointFor("logs"))
+		}
+	}
 
 	if exporterEnabled("traces", log) {
 		exp, err := otlptracehttp.New(ctx)
@@ -87,11 +119,19 @@ func Setup(ctx context.Context, version string) (func(context.Context) error, er
 		}
 	}
 
+	if logShutdown != nil {
+		shutdowns = append(shutdowns, logShutdown)
+	}
+
+	if handler == nil {
+		handler = stdoutLogHandler(level)
+	}
+
 	if len(shutdowns) == 0 {
-		if endpointFor("traces") == "" && endpointFor("metrics") == "" {
-			log.Info("otel exporters disabled; set OTEL_EXPORTER_OTLP_ENDPOINT to export traces and metrics")
+		if endpointFor("traces") == "" && endpointFor("metrics") == "" && endpointFor("logs") == "" {
+			log.Info("otel exporters disabled; set OTEL_EXPORTER_OTLP_ENDPOINT to export traces, metrics and logs")
 		}
-		return noopShutdown, nil
+		return noopShutdown, handler, nil
 	}
 
 	return func(ctx context.Context) error {
@@ -100,7 +140,14 @@ func Setup(ctx context.Context, version string) (func(context.Context) error, er
 			errs = append(errs, shutdown(ctx))
 		}
 		return errors.Join(errs...)
-	}, nil
+	}, handler, nil
+}
+
+// stdoutLogHandler keeps development output readable when OTLP logs are not
+// configured. Trace and span IDs are added manually because there is no OTel
+// log record to carry them.
+func stdoutLogHandler(level slog.Leveler) slog.Handler {
+	return NewLogHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 }
 
 // HTTPHandler wraps h with OTel server spans and HTTP metrics. Static assets and
@@ -172,6 +219,8 @@ func endpointFor(signal string) string {
 		specific = os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
 	case "metrics":
 		specific = os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+	case "logs":
+		specific = os.Getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
 	}
 	if strings.TrimSpace(specific) != "" {
 		return specific
@@ -192,6 +241,8 @@ func exporterEnabled(signal string, log *slog.Logger) bool {
 		name = os.Getenv("OTEL_TRACES_EXPORTER")
 	case "metrics":
 		name = os.Getenv("OTEL_METRICS_EXPORTER")
+	case "logs":
+		name = os.Getenv("OTEL_LOGS_EXPORTER")
 	}
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", "otlp":

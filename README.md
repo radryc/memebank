@@ -110,7 +110,7 @@ Animated GIFs are CPU-intensive on the first request (roughly 1–2s for a 24-fr
 server/
   main.go                 flags, observability, shutdown, static serving
   internal/api/           HTTP handlers, uploads, SPA
-  internal/observability/ OpenTelemetry setup, metrics, log correlation
+  internal/observability/ OpenTelemetry setup, traces, metrics, and OTLP logs
   internal/store/         SQLite schema + queries
   internal/seed/          Imgflip seeding, generated GIFs, Giphy
 web/
@@ -170,8 +170,8 @@ bin/memebank-admin -data ./data memes migrate-spec -yes
 
 ## Observability
 
-The server emits OpenTelemetry traces and metrics over OTLP/HTTP using the
-standard `OTEL_*` environment variables. Exporting is disabled unless an
+The server emits OpenTelemetry traces, metrics and logs over OTLP/HTTP using
+the standard `OTEL_*` environment variables. Exporting is disabled unless an
 endpoint is configured, so local development stays quiet by default.
 
 | Env | Default | Purpose |
@@ -179,6 +179,7 @@ endpoint is configured, so local development stays quiet by default.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset (disabled) | OTLP/HTTP collector base URL, e.g. `http://localhost:4318` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Per-signal endpoint override |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | Per-signal endpoint override |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | unset | Per-signal endpoint override |
 | `OTEL_SERVICE_NAME` | `memebank` | `service.name` resource attribute |
 | `OTEL_RESOURCE_ATTRIBUTES` | unset | Extra resource attributes (`key=value,key=value`) |
 | `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | `always_on`, `always_off`, `traceidratio`, or `parentbased_*` |
@@ -186,6 +187,7 @@ endpoint is configured, so local development stays quiet by default.
 | `OTEL_PROPAGATORS` | `tracecontext,baggage` | Incoming/outgoing context propagation |
 | `OTEL_TRACES_EXPORTER` | `otlp` | Set `none` to disable traces |
 | `OTEL_METRICS_EXPORTER` | `otlp` | Set `none` to disable metrics |
+| `OTEL_LOGS_EXPORTER` | `otlp` | Set `none` to keep logs on stdout |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `60000` | Metric export interval in milliseconds |
 | `OTEL_SDK_DISABLED` | `false` | Disable all telemetry |
 
@@ -199,8 +201,11 @@ Instrumented signals:
   `memebank.templates.created`, `memebank.votes`, `memebank.renders`,
   `memebank.render.duration`, and the `memebank.image_cache.bytes` gauge.
 - SQLite connection-pool metrics (`db.sql.*`) via `otelsql`.
-- Request and error logs include `trace_id` and `span_id`, so logs can be
+- Structured `slog` records sent to the OTel logs SDK over OTLP. The SDK
+  attaches `trace_id` and `span_id` from the request context, so logs can be
   joined with traces in the backend.
+- When no OTLP endpoint is configured (or `OTEL_LOGS_EXPORTER=none`), logs fall
+  back to the previous text format on stdout so local development still works.
 
 Static assets and `/uploads` are not traced. The Guardian partition already
 points `OTEL_EXPORTER_OTLP_ENDPOINT` at the in-cluster collector on port 4318.

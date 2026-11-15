@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"strings"
@@ -102,6 +103,7 @@ func TestEndpointFor(t *testing.T) {
 		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
 		t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
 		t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+		t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
 		if got := endpointFor("traces"); got != "http://collector:4318" {
 			t.Fatalf("endpointFor(traces) = %q", got)
 		}
@@ -112,6 +114,14 @@ func TestEndpointFor(t *testing.T) {
 		t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://traces:4318")
 		if got := endpointFor("traces"); got != "http://traces:4318" {
 			t.Fatalf("endpointFor(traces) = %q", got)
+		}
+	})
+
+	t.Run("logs override", func(t *testing.T) {
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+		t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "http://logs:4318")
+		if got := endpointFor("logs"); got != "http://logs:4318" {
+			t.Fatalf("endpointFor(logs) = %q", got)
 		}
 	})
 }
@@ -154,6 +164,58 @@ func TestExporterEnabled(t *testing.T) {
 			t.Fatal("exporterEnabled(traces) = true, want false when disabled")
 		}
 	})
+
+	t.Run("logs enabled with endpoint", func(t *testing.T) {
+		t.Setenv("OTEL_SDK_DISABLED", "")
+		t.Setenv("OTEL_LOGS_EXPORTER", "")
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+		t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+		if !exporterEnabled("logs", log) {
+			t.Fatal("exporterEnabled(logs) = false, want true")
+		}
+	})
+
+	t.Run("logs none exporter", func(t *testing.T) {
+		t.Setenv("OTEL_SDK_DISABLED", "")
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+		t.Setenv("OTEL_LOGS_EXPORTER", "none")
+		if exporterEnabled("logs", log) {
+			t.Fatal("exporterEnabled(logs) = true, want false for none")
+		}
+	})
+}
+
+func TestSetupFallsBackToStdout(t *testing.T) {
+	previous := slog.Default()
+	slog.SetDefault(testLogger())
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	t.Setenv("OTEL_SDK_DISABLED", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+	t.Setenv("OTEL_TRACES_EXPORTER", "")
+	t.Setenv("OTEL_METRICS_EXPORTER", "")
+	t.Setenv("OTEL_LOGS_EXPORTER", "")
+
+	shutdown, handler, err := Setup(context.Background(), "test", slog.LevelInfo)
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	defer func() {
+		if err := shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+	}()
+
+	wrapped, ok := handler.(logHandler)
+	if !ok {
+		t.Fatalf("handler = %T, want logHandler wrapper", handler)
+	}
+	if _, ok := wrapped.Handler.(*slog.TextHandler); !ok {
+		t.Fatalf("fallback handler = %T, want *slog.TextHandler", wrapped.Handler)
+	}
 }
 
 func contains(values []string, want string) bool {

@@ -34,23 +34,27 @@ func main() {
 	if *debug {
 		level = slog.LevelDebug
 	}
-	baseHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	log := slog.New(observability.NewLogHandler(baseHandler))
-	slog.SetDefault(log)
+	// Bootstrap logger for failures before the telemetry providers exist.
+	bootstrap := slog.New(observability.NewLogHandler(
+		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}),
+	))
+	slog.SetDefault(bootstrap)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	shutdownObservability, err := observability.Setup(ctx, version)
+	shutdownObservability, logHandler, err := observability.Setup(ctx, version, level)
 	if err != nil {
-		log.Error("could not set up observability", "error", err)
+		bootstrap.Error("could not set up observability", "error", err)
 		os.Exit(1)
 	}
+	log := slog.New(logHandler)
+	slog.SetDefault(log)
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := shutdownObservability(shutdownCtx); err != nil {
-			log.Error("could not flush telemetry", "error", err)
+			bootstrap.Error("could not flush telemetry", "error", err)
 		}
 	}()
 
