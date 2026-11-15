@@ -108,8 +108,9 @@ Animated GIFs are CPU-intensive on the first request (roughly 1–2s for a 24-fr
 
 ```
 server/
-  main.go                 flags, shutdown, static serving
+  main.go                 flags, observability, shutdown, static serving
   internal/api/           HTTP handlers, uploads, SPA
+  internal/observability/ OpenTelemetry setup, metrics, log correlation
   internal/store/         SQLite schema + queries
   internal/seed/          Imgflip seeding, generated GIFs, Giphy
 web/
@@ -166,6 +167,51 @@ Example: remove an unused template and convert old stored memes:
 bin/memebank-admin -data ./data templates delete curated-elon-dancing -yes
 bin/memebank-admin -data ./data memes migrate-spec -yes
 ```
+
+## Observability
+
+The server emits OpenTelemetry traces and metrics over OTLP/HTTP using the
+standard `OTEL_*` environment variables. Exporting is disabled unless an
+endpoint is configured, so local development stays quiet by default.
+
+| Env | Default | Purpose |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset (disabled) | OTLP/HTTP collector base URL, e.g. `http://localhost:4318` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Per-signal endpoint override |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | Per-signal endpoint override |
+| `OTEL_SERVICE_NAME` | `memebank` | `service.name` resource attribute |
+| `OTEL_RESOURCE_ATTRIBUTES` | unset | Extra resource attributes (`key=value,key=value`) |
+| `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | `always_on`, `always_off`, `traceidratio`, or `parentbased_*` |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Ratio for `*traceidratio` samplers |
+| `OTEL_PROPAGATORS` | `tracecontext,baggage` | Incoming/outgoing context propagation |
+| `OTEL_TRACES_EXPORTER` | `otlp` | Set `none` to disable traces |
+| `OTEL_METRICS_EXPORTER` | `otlp` | Set `none` to disable metrics |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `60000` | Metric export interval in milliseconds |
+| `OTEL_SDK_DISABLED` | `false` | Disable all telemetry |
+
+Instrumented signals:
+
+- Server spans for `/api/*` using Go 1.22 `ServeMux` patterns
+  (`GET /api/memes/{id}`), with W3C `traceparent` context honored.
+- Standard HTTP server metrics from `otelhttp`, including
+  `http.server.request.duration`.
+- Application metrics: `memebank.memes.created`,
+  `memebank.templates.created`, `memebank.votes`, `memebank.renders`,
+  `memebank.render.duration`, and the `memebank.image_cache.bytes` gauge.
+- SQLite connection-pool metrics (`db.sql.*`) via `otelsql`.
+- Request and error logs include `trace_id` and `span_id`, so logs can be
+  joined with traces in the backend.
+
+Static assets and `/uploads` are not traced. The Guardian partition already
+points `OTEL_EXPORTER_OTLP_ENDPOINT` at the in-cluster collector on port 4318.
+Outside Kubernetes, point it at any OTLP/HTTP collector:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 make run
+```
+
+`make build` and the Docker image set `service.version` to the git short SHA
+(the image tag) through `-ldflags "-X main.version=..."`.
 
 ## Development commands
 

@@ -15,7 +15,7 @@ REF="${REGISTRY}/memebank:${TAG}"
 INTENT="${ROOT}/guardian/partitions/memebank/intents/images.yaml"
 
 echo "→ building ${REF}"
-docker build -t "${REF}" "${ROOT}"
+docker build --build-arg VERSION="${TAG}" -t "${REF}" "${ROOT}"
 
 echo "→ pushing ${REF}"
 docker push "${REF}"

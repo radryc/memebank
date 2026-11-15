@@ -1,5 +1,7 @@
 .PHONY: dev-api dev-web build build-web build-api build-admin admin run test fmt vet
 
+VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+
 dev-api:
 	cd server && go run . -addr :8080
 
@@ -13,7 +15,7 @@ build-web:
 
 build-api:
 	mkdir -p bin
-	cd server && go build -o ../bin/memebank .
+	cd server && go build -ldflags "-X main.version=$(VERSION)" -o ../bin/memebank .
 
 build-admin:
 	mkdir -p bin

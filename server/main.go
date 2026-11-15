@@ -14,9 +14,13 @@ import (
 	"time"
 
 	"github.com/radryc/memebank/server/internal/api"
+	"github.com/radryc/memebank/server/internal/observability"
 	"github.com/radryc/memebank/server/internal/seed"
 	"github.com/radryc/memebank/server/internal/store"
 )
+
+// version is overridden at build time with -ldflags "-X main.version=...".
+var version = "dev"
 
 func main() {
 	addr := flag.String("addr", env("MEMEBANK_ADDR", ":8080"), "listen address")
@@ -30,8 +34,30 @@ func main() {
 	if *debug {
 		level = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	baseHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	log := slog.New(observability.NewLogHandler(baseHandler))
 	slog.SetDefault(log)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	shutdownObservability, err := observability.Setup(ctx, version)
+	if err != nil {
+		log.Error("could not set up observability", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownObservability(shutdownCtx); err != nil {
+			log.Error("could not flush telemetry", "error", err)
+		}
+	}()
+
+	metrics, err := observability.NewMetrics()
+	if err != nil {
+		log.Warn("could not create application metrics", "error", err)
+	}
 
 	uploadsDir := filepath.Join(*dataDir, "uploads")
 	for _, dir := range []string{*dataDir, filepath.Join(uploadsDir, "templates"), filepath.Join(uploadsDir, "memes")} {
@@ -48,14 +74,11 @@ func main() {
 	}
 	defer st.Close()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	if err := seed.Ensure(ctx, st, uploadsDir, log, !*noSeed); err != nil {
 		log.Error("template seeding failed", "error", err)
 	}
 
-	handler := api.New(st, uploadsDir, *staticDir, log)
+	handler := observability.HTTPHandler(api.New(st, uploadsDir, *staticDir, log, metrics))
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           handler,
