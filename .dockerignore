@@ -1,0 +1,8 @@
+.git
+.github
+bin
+data
+server/data
+web/node_modules
+web/dist
+web/.vite

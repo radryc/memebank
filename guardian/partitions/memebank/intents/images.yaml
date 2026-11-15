@@ -12,8 +12,8 @@ spec:
   assets:
     - type: ImageBuild
       name: memebank-build
-      version: "58740ee"
+      version: "471e5e9"
       properties:
         registry: registry.strata.local:5000
         repository: memebank
-        sourceImage: registry.strata.local:5000/memebank:58740ee
+        sourceImage: registry.strata.local:5000/memebank:471e5e9
