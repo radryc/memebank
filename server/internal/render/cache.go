@@ -25,6 +25,13 @@ func (c *ByteCache) Get(key string) ([]byte, bool) {
 	return data, ok
 }
 
+// Bytes reports how many bytes are currently cached.
+func (c *ByteCache) Bytes() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.size
+}
+
 // Put stores an image, evicting the oldest entries until it fits.
 func (c *ByteCache) Put(key string, data []byte) {
 	if len(data) == 0 || len(data) > c.maxBytes {

@@ -15,6 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/radryc/memebank/server/internal/imghash"
+	"github.com/radryc/memebank/server/internal/observability"
 )
 
 // ErrNotFound is returned when a requested row does not exist.
@@ -88,7 +89,8 @@ type ListOptions struct {
 
 // Store wraps the SQLite database.
 type Store struct {
-	db *sql.DB
+	db        *sql.DB
+	dbMetrics func()
 }
 
 // Open opens (and migrates) the database at path.
@@ -108,10 +110,18 @@ func Open(path string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
+	if cleanup, err := observability.InstrumentDB(db); err == nil {
+		s.dbMetrics = cleanup
+	}
 	return s, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if s.dbMetrics != nil {
+		s.dbMetrics()
+	}
+	return s.db.Close()
+}
 
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(`

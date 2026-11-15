@@ -31,6 +31,7 @@ import (
 	_ "golang.org/x/image/webp"
 
 	"github.com/radryc/memebank/server/internal/imghash"
+	"github.com/radryc/memebank/server/internal/observability"
 	"github.com/radryc/memebank/server/internal/render"
 	"github.com/radryc/memebank/server/internal/store"
 )
@@ -45,6 +46,7 @@ type Server struct {
 	uploads    string
 	staticDir  string
 	log        *slog.Logger
+	metrics    *observability.Metrics
 	mux        *http.ServeMux
 	templateMu sync.Mutex
 	imageGroup singleflight.Group
@@ -52,16 +54,21 @@ type Server struct {
 	imageCache *render.ByteCache
 }
 
-// New builds the HTTP handler for the API, uploads and the SPA.
-func New(st *store.Store, uploadsDir, staticDir string, log *slog.Logger) http.Handler {
+// New builds the HTTP handler for the API, uploads and the SPA. metrics may be
+// nil, in which case application-level metrics are not recorded.
+func New(st *store.Store, uploadsDir, staticDir string, log *slog.Logger, metrics *observability.Metrics) http.Handler {
 	s := &Server{
 		st:         st,
 		uploads:    uploadsDir,
 		staticDir:  staticDir,
 		log:        log,
+		metrics:    metrics,
 		mux:        http.NewServeMux(),
 		imageSem:   make(chan struct{}, 2),
 		imageCache: render.NewByteCache(64 << 20),
+	}
+	if err := s.metrics.RegisterCacheSize(func() int64 { return int64(s.imageCache.Bytes()) }); err != nil {
+		log.Warn("could not register cache metrics", "error", err)
 	}
 
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
@@ -104,7 +111,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	st, err := s.st.Stats()
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not load stats", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not load stats", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
@@ -116,7 +123,7 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	media := r.URL.Query().Get("media")
 	templates, err := s.st.ListTemplates(source, search, media)
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not load templates", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not load templates", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"templates": templates, "total": len(templates)})
@@ -167,7 +174,7 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		duplicate = true
 		match = "exact"
 	} else if !errors.Is(err, store.ErrNotFound) {
-		s.fail(w, http.StatusInternalServerError, "could not check for duplicates", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not check for duplicates", err)
 		return
 	}
 
@@ -198,7 +205,7 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 
 	filename, err := saveUpload(filepath.Join(s.uploads, "templates"), data, extensionFor(format))
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not save image", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not save image", err)
 		return
 	}
 
@@ -215,9 +222,10 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      time.Now().UTC(),
 	}
 	if err := s.st.CreateTemplate(t); err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not save template", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not save template", err)
 		return
 	}
+	s.metrics.TemplateCreated(r.Context(), t.Source)
 	writeJSON(w, http.StatusCreated, map[string]any{"template": t})
 }
 
@@ -234,7 +242,7 @@ func (s *Server) handleMemes(w http.ResponseWriter, r *http.Request) {
 
 	memes, hasMore, err := s.st.ListMemes(opts)
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not load memes", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not load memes", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -251,7 +259,7 @@ func (s *Server) handleMeme(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not load meme", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not load meme", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"meme": m})
@@ -297,7 +305,7 @@ func (s *Server) handleCreateMeme(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "unknown templateId")
 			return
 		} else if err != nil {
-			s.fail(w, http.StatusInternalServerError, "could not check template", err)
+			s.fail(w, r, http.StatusInternalServerError, "could not check template", err)
 			return
 		}
 	}
@@ -320,7 +328,7 @@ func (s *Server) handleCreateMeme(w http.ResponseWriter, r *http.Request) {
 		}
 		filename, err := saveUpload(filepath.Join(s.uploads, "memes"), data, extensionFor(format))
 		if err != nil {
-			s.fail(w, http.StatusInternalServerError, "could not save meme", err)
+			s.fail(w, r, http.StatusInternalServerError, "could not save meme", err)
 			return
 		}
 		imageURL = "/uploads/memes/" + filename
@@ -346,9 +354,10 @@ func (s *Server) handleCreateMeme(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:  time.Now().UTC(),
 	})
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not publish meme", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not publish meme", err)
 		return
 	}
+	s.metrics.MemeCreated(r.Context(), m.Animated)
 	writeJSON(w, http.StatusCreated, map[string]any{"meme": m})
 }
 
@@ -359,7 +368,7 @@ func (s *Server) handleMemeImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not load meme", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not load meme", err)
 		return
 	}
 	if m.StoredImage != "" {
@@ -376,7 +385,7 @@ func (s *Server) handleMemeImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not load template", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not load template", err)
 		return
 	}
 	if !strings.HasPrefix(template.ImageURL, "/uploads/") {
@@ -385,6 +394,7 @@ func (s *Server) handleMemeImage(w http.ResponseWriter, r *http.Request) {
 	}
 	path := filepath.Join(s.uploads, filepath.FromSlash(strings.TrimPrefix(template.ImageURL, "/uploads/")))
 
+	renderStart := time.Now()
 	value, err, _ := s.imageGroup.Do(m.ID, func() (any, error) {
 		if cached, ok := s.imageCache.Get(m.ID); ok {
 			return cached, nil
@@ -412,14 +422,15 @@ func (s *Server) handleMemeImage(w http.ResponseWriter, r *http.Request) {
 		return data, nil
 	})
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not render meme", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not render meme", err)
 		return
 	}
 	data, ok := value.([]byte)
 	if !ok {
-		s.fail(w, http.StatusInternalServerError, "could not render meme", errors.New("unexpected cache value"))
+		s.fail(w, r, http.StatusInternalServerError, "could not render meme", errors.New("unexpected cache value"))
 		return
 	}
+	s.metrics.Render(r.Context(), template.Animated, time.Since(renderStart))
 
 	contentType := "image/png"
 	extension := "png"
@@ -457,9 +468,10 @@ func (s *Server) handleVote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not record vote", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not record vote", err)
 		return
 	}
+	s.metrics.Vote(r.Context(), mine)
 	writeJSON(w, http.StatusOK, map[string]int{
 		"upvotes":   up,
 		"downvotes": down,
@@ -476,14 +488,14 @@ func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 		VoterID: voterID(r),
 	})
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not load leaderboard", err)
+		s.fail(w, r, http.StatusInternalServerError, "could not load leaderboard", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"memes": memes})
 }
 
-func (s *Server) fail(w http.ResponseWriter, code int, msg string, err error) {
-	s.log.Error(msg, "error", err)
+func (s *Server) fail(w http.ResponseWriter, r *http.Request, code int, msg string, err error) {
+	s.log.ErrorContext(r.Context(), msg, "error", err)
 	writeErr(w, code, msg)
 }
 
@@ -618,7 +630,7 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
-		s.log.Info("request",
+		s.log.InfoContext(r.Context(), "request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", sw.status,
@@ -655,7 +667,7 @@ func (s *Server) recoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				s.log.Error("panic", "value", rec, "path", r.URL.Path)
+				s.log.ErrorContext(r.Context(), "panic", "value", rec, "path", r.URL.Path)
 				writeErr(w, http.StatusInternalServerError, "internal server error")
 			}
 		}()
