@@ -2,5 +2,5 @@ serviceAnnotations:
   # Dynamic mode: lb-edge allocates a free external port. The port is visible
   # in the lb-edge registry at :18081/services and on the monofs-external
   # Service as dyn-<port>.
-  guardian.intent/expose: "false"
+  guardian.intent/expose: "true"
   guardian.intent/service-name: memebank
