@@ -28,5 +28,5 @@ spec:
     component: memebank
     topology: kubernetes
     managedBy: guardian
-    owner: memebank@example.com
+    owner: ryckor@example.com
     watcher: autodiscovery
