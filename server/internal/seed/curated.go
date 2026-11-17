@@ -91,9 +91,10 @@ func ensureCuratedTemplates(ctx context.Context, st *store.Store, dir string, lo
 
 		file, width, height, err := downloadCurated(ctx, dir, item.ID, item.URL)
 		if err != nil {
-			log.Warn("could not download curated template", "name", item.Name, "error", err)
+			log.Warn("could not download curated template", "name", item.Name, "url", item.URL, "error", err)
 			continue
 		}
+		log.Info("curated template downloaded", "name", item.Name, "file", file, "width", width, "height", height, "url", item.URL)
 		t := store.Template{
 			ID:        item.ID,
 			Name:      item.Name,

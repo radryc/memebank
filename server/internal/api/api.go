@@ -142,14 +142,7 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		name = name[:70]
 	}
 
-	file, _, err := r.FormFile("image")
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "an image file is required")
-		return
-	}
-	defer file.Close()
-
-	data, cfg, format, err := readImage(file)
+	data, cfg, format, err := readTemplateUpload(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -507,6 +500,26 @@ func parseMultipart(w http.ResponseWriter, r *http.Request) error {
 		return errors.New("upload is too large or malformed (max 12MB)")
 	}
 	return nil
+}
+
+// readTemplateUpload reads the "image" part. Browsers normally send a filename,
+// but clipboard images may arrive without one; Go then parses the part as a
+// form value, so fall back to the raw value bytes.
+func readTemplateUpload(r *http.Request) ([]byte, image.Config, string, error) {
+	file, _, err := r.FormFile("image")
+	switch {
+	case err == nil:
+		defer file.Close()
+		return readImage(file)
+	case !errors.Is(err, http.ErrMissingFile):
+		return nil, image.Config{}, "", errors.New("could not read the uploaded image")
+	}
+	if r.MultipartForm != nil {
+		if values := r.MultipartForm.Value["image"]; len(values) > 0 && values[0] != "" {
+			return readImage(strings.NewReader(values[0]))
+		}
+	}
+	return nil, image.Config{}, "", errors.New("an image file is required")
 }
 
 func readImage(src io.Reader) ([]byte, image.Config, string, error) {

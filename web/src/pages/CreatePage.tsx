@@ -22,8 +22,10 @@ import {
 import { renderGifMeme } from '../lib/gifMeme'
 import { imageFromClipboard } from '../lib/clipboard'
 import { cn } from '../lib/utils'
+import AddImageDialog from '../components/AddImageDialog'
 import {
   Check,
+  Clipboard,
   Dice,
   Download,
   ImageIcon,
@@ -31,7 +33,6 @@ import {
   Plus,
   Search,
   Sparkles,
-  Upload,
 } from '../components/Icons'
 
 type TemplateFilter = 'all' | 'imgflip' | 'upload' | 'gif'
@@ -112,6 +113,7 @@ export default function CreatePage() {
   const [imageLoading, setImageLoading] = useState(false)
   const [imageError, setImageError] = useState('')
   const [uploading, setUploading] = useState(false)
+  const [addOpen, setAddOpen] = useState(false)
   const [publishing, setPublishing] = useState(false)
   const [gifProgress, setGifProgress] = useState<number | null>(null)
   const [error, setError] = useState('')
@@ -127,7 +129,6 @@ export default function CreatePage() {
   const [selectedCaption, setSelectedCaption] = useState<CaptionSlot | null>(null)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const fileRef = useRef<HTMLInputElement>(null)
   const selectedRef = useRef<HTMLButtonElement | null>(null)
   const gridRef = useRef<HTMLDivElement>(null)
 
@@ -281,12 +282,14 @@ export default function CreatePage() {
       setError(err instanceof Error ? err.message : 'Upload failed')
     } finally {
       setUploading(false)
-      if (fileRef.current) fileRef.current.value = ''
     }
   }, [])
 
+  // Ctrl+V / ⌘V works anywhere on the editor. When the dialog is open it owns
+  // the paste event so the image is not uploaded twice.
   useEffect(() => {
     const onPaste = (event: ClipboardEvent) => {
+      if (addOpen) return
       const file = imageFromClipboard(event)
       if (!file) return
       event.preventDefault()
@@ -294,7 +297,7 @@ export default function CreatePage() {
     }
     window.addEventListener('paste', onPaste)
     return () => window.removeEventListener('paste', onPaste)
-  }, [handleUpload])
+  }, [addOpen, handleUpload])
 
   const lucky = () => {
     const [top, bottom] = randomCaptions[Math.floor(Math.random() * randomCaptions.length)]
@@ -711,20 +714,13 @@ export default function CreatePage() {
               </div>
               <button
                 type="button"
-                onClick={() => fileRef.current?.click()}
+                onClick={() => setAddOpen(true)}
                 disabled={uploading}
                 className="btn-secondary px-3 py-1.5 text-xs"
               >
-                {uploading ? <Loader className="size-3.5" /> : <Upload className="size-3.5" />}
-                {uploading ? 'Uploading…' : 'Upload'}
+                {uploading ? <Loader className="size-3.5" /> : <Plus className="size-3.5" />}
+                {uploading ? 'Uploading…' : 'Add image'}
               </button>
-              <input
-                ref={fileRef}
-                type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif"
-                className="hidden"
-                onChange={(event) => void handleUpload(event.target.files?.[0])}
-              />
             </div>
 
             <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -817,9 +813,9 @@ export default function CreatePage() {
               </p>
             )}
             <p className="mt-3 flex items-start gap-1.5 text-[10px] leading-relaxed text-zinc-600">
-              <Upload className="mt-0.5 size-3 shrink-0" />
+              <Clipboard className="mt-0.5 size-3 shrink-0" />
               <span>
-                Upload or paste an image/GIF with{' '}
+                Hit Add image to upload or paste, or press{' '}
                 <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 py-0.5 font-sans text-[9px] text-zinc-400">
                   ⌘V
                 </kbd>{' '}
@@ -1021,6 +1017,14 @@ export default function CreatePage() {
           </section>
         </div>
       </div>
+
+      <AddImageDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onFile={(file, source) => {
+          void handleUpload(file, source === 'paste' ? 'Pasted image' : undefined)
+        }}
+      />
     </div>
   )
 }

@@ -68,9 +68,25 @@ export function fetchTemplates(params: { source?: string; q?: string; media?: st
   return request<{ templates: Template[]; total: number }>(`/api/templates${suffix}`)
 }
 
+const extensionByType: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+}
+
+/**
+ * Clipboard images can arrive without a filename. Go's multipart parser treats
+ * a file part with an empty filename as a plain form value, so always send one.
+ */
+function uploadFileName(file: File): string {
+  if (file.name.trim() && /\.[a-z0-9]+$/i.test(file.name)) return file.name
+  return `upload.${extensionByType[file.type.toLowerCase()] ?? 'png'}`
+}
+
 export function uploadTemplate(file: File, name: string) {
   const form = new FormData()
-  form.set('image', file)
+  form.set('image', file, uploadFileName(file))
   form.set('name', name)
   return request<{ template: Template; duplicate?: boolean; match?: 'exact' | 'similar' }>(
     '/api/templates',

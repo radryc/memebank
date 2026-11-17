@@ -59,18 +59,40 @@ type imgflipResponse struct {
 	} `json:"data"`
 }
 
-// Ensure seeds templates if the database has none. Failures are non-fatal:
-// the board still works with user uploads and generated fallbacks.
+// Ensure seeds templates when the database has none and retries failed Imgflip
+// downloads when the library only contains generated fallbacks. Failures are
+// non-fatal: the board still works with user uploads and generated fallbacks.
 func Ensure(ctx context.Context, st *store.Store, uploadsDir string, log *slog.Logger, enabled bool) error {
 	count, err := st.CountTemplates()
 	if err != nil {
 		return fmt.Errorf("count templates: %w", err)
+	}
+	downloaded, err := st.CountTemplatesBySource("imgflip")
+	if err != nil {
+		return fmt.Errorf("count downloaded templates: %w", err)
+	}
+	generated, err := st.CountTemplatesBySource("generated")
+	if err != nil {
+		return fmt.Errorf("count generated templates: %w", err)
 	}
 	dir := filepath.Join(uploadsDir, "templates")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create template dir: %w", err)
 	}
 	if count > 0 {
+		log.Info("template library found", "templates", count, "downloaded", downloaded, "generated", generated)
+		// A previous run may have fallen back to generated canvases because
+		// Imgflip was unreachable (for example during the first boot). Retry
+		// the download instead of staying on the fallback set forever.
+		if enabled && downloaded == 0 && generated > 0 {
+			log.Info("no downloaded templates yet, retrying imgflip download", "max", maxSeed)
+			inserted, err := seedImgflip(ctx, st, dir, log)
+			if err != nil {
+				log.Warn("imgflip download retry failed, keeping existing templates", "error", err)
+			} else {
+				log.Info("downloaded templates on retry", "count", inserted)
+			}
+		}
 		ensureCuratedTemplates(ctx, st, dir, log)
 		if err := ensureAnimatedTemplates(ctx, st, dir, log); err != nil {
 			log.Warn("animated template seeding failed", "error", err)
@@ -83,13 +105,14 @@ func Ensure(ctx context.Context, st *store.Store, uploadsDir string, log *slog.L
 		return nil
 	}
 
-	log.Info("seeding meme templates from imgflip", "max", maxSeed)
+	log.Info("seeding meme templates from imgflip", "url", imgflipURL, "max", maxSeed)
 	inserted, err := seedImgflip(ctx, st, dir, log)
 	if err != nil {
-		log.Warn("imgflip seed failed, using generated templates", "error", err)
+		log.Warn("imgflip seed failed", "error", err)
 	}
 	if inserted == 0 {
-		n, ferr := seedFallbacks(st, dir)
+		log.Warn("no imgflip templates downloaded, generating blank canvas fallbacks")
+		n, ferr := seedFallbacks(st, dir, log)
 		if ferr != nil {
 			return fmt.Errorf("fallback seed: %w", ferr)
 		}
@@ -101,7 +124,7 @@ func Ensure(ctx context.Context, st *store.Store, uploadsDir string, log *slog.L
 		backfillTemplateFingerprints(st, uploadsDir, log)
 		return nil
 	}
-	log.Info("seeded templates", "count", inserted)
+	log.Info("seeded templates", "imgflip", inserted)
 	ensureCuratedTemplates(ctx, st, dir, log)
 	if err := ensureAnimatedTemplates(ctx, st, dir, log); err != nil {
 		log.Warn("animated template seeding failed", "error", err)
@@ -123,6 +146,7 @@ func seedImgflip(ctx context.Context, st *store.Store, dir string, log *slog.Log
 	reqCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 
+	log.Info("requesting imgflip template list", "url", imgflipURL)
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, imgflipURL, nil)
 	if err != nil {
 		return 0, err
@@ -144,6 +168,7 @@ func seedImgflip(ctx context.Context, st *store.Store, dir string, log *slog.Log
 	if !payload.Success {
 		return 0, errors.New("imgflip returned success=false")
 	}
+	log.Info("imgflip template list received", "available", len(payload.Data.Memes))
 
 	jobs := make([]download, 0, maxSeed)
 	for i, m := range payload.Data.Memes {
@@ -158,12 +183,14 @@ func seedImgflip(ctx context.Context, st *store.Store, dir string, log *slog.Log
 	if len(jobs) == 0 {
 		return 0, errors.New("imgflip returned no usable templates")
 	}
+	log.Info("downloading meme templates", "count", len(jobs), "concurrency", 6)
 
 	type result struct {
 		job    download
 		file   string
 		width  int
 		height int
+		size   int
 		err    error
 	}
 	results := make(chan result, len(jobs))
@@ -175,19 +202,29 @@ func seedImgflip(ctx context.Context, st *store.Store, dir string, log *slog.Log
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			name, w, h, err := fetchTemplate(ctx, dir, job)
-			results <- result{job: job, file: name, width: w, height: h, err: err}
+			name, w, h, size, err := fetchTemplate(ctx, dir, job)
+			results <- result{job: job, file: name, width: w, height: h, size: size, err: err}
 		}(job)
 	}
 	wg.Wait()
 	close(results)
 
 	var collected []result
+	failed := 0
 	for r := range results {
 		if r.err != nil {
-			log.Debug("template download failed", "name", r.job.name, "error", r.err)
+			failed++
+			log.Warn("template download failed", "name", r.job.name, "url", r.job.url, "error", r.err)
 			continue
 		}
+		log.Info("template downloaded",
+			"name", r.job.name,
+			"file", r.file,
+			"bytes", r.size,
+			"width", r.width,
+			"height", r.height,
+			"url", r.job.url,
+		)
 		collected = append(collected, r)
 	}
 	// Preserve the API's popularity order when inserting.
@@ -202,6 +239,7 @@ func seedImgflip(ctx context.Context, st *store.Store, dir string, log *slog.Log
 	inserted := 0
 	for _, r := range collected {
 		if templateDeleted(st, r.job.id) {
+			log.Info("skipping template deleted by admin", "name", r.job.name, "id", r.job.id)
 			continue
 		}
 		name := r.job.name
@@ -218,48 +256,49 @@ func seedImgflip(ctx context.Context, st *store.Store, dir string, log *slog.Log
 			CreatedAt: time.Now().UTC().Add(time.Duration(inserted) * time.Millisecond),
 		}
 		if err := st.CreateTemplate(t); err != nil {
-			log.Debug("insert template failed", "name", r.job.name, "error", err)
+			log.Warn("insert template failed", "name", r.job.name, "error", err)
 			continue
 		}
 		inserted++
 	}
+	log.Info("imgflip seed finished", "downloaded", len(collected), "failed", failed, "inserted", inserted)
 	if inserted == 0 {
 		return 0, errors.New("no templates could be downloaded")
 	}
 	return inserted, nil
 }
 
-func fetchTemplate(ctx context.Context, dir string, job download) (string, int, int, error) {
+func fetchTemplate(ctx context.Context, dir string, job download) (string, int, int, int, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, job.url, nil)
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, 0, err
 	}
 	req.Header.Set("User-Agent", "github.com/radryc/memebank/server/1.0 (meme template seeder)")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, 0, fmt.Errorf("status %d", resp.StatusCode)
+		return "", 0, 0, 0, fmt.Errorf("status %d", resp.StatusCode)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, 0, err
 	}
 	if len(data) > maxBytes {
-		return "", 0, 0, errors.New("image too large")
+		return "", 0, 0, 0, errors.New("image too large")
 	}
 
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("decode: %w", err)
+		return "", 0, 0, 0, fmt.Errorf("decode: %w", err)
 	}
 	if cfg.Width < 64 || cfg.Height < 64 || cfg.Width > 8000 || cfg.Height > 8000 {
-		return "", 0, 0, fmt.Errorf("unsupported dimensions %dx%d", cfg.Width, cfg.Height)
+		return "", 0, 0, 0, fmt.Errorf("unsupported dimensions %dx%d", cfg.Width, cfg.Height)
 	}
 	ext := "." + format
 	if format == "jpeg" {
@@ -268,14 +307,14 @@ func fetchTemplate(ctx context.Context, dir string, job download) (string, int, 
 	file := job.id + ext
 	path := filepath.Join(dir, file)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, 0, err
 	}
 	w := job.width
 	h := job.height
 	if w <= 0 || h <= 0 {
 		w, h = cfg.Width, cfg.Height
 	}
-	return file, w, h, nil
+	return file, w, h, len(data), nil
 }
 
 // fallbackTheme describes a generated abstract template.
@@ -295,11 +334,12 @@ var fallbackThemes = []fallbackTheme{
 	{"Blank Canvas · Toxic", color.NRGBA{0x1f, 0x33, 0x08, 0xff}, color.NRGBA{0x08, 0x0d, 0x05, 0xff}, color.NRGBA{0x9d, 0xff, 0x3d, 0xff}},
 }
 
-func seedFallbacks(st *store.Store, dir string) (int, error) {
+func seedFallbacks(st *store.Store, dir string, log *slog.Logger) (int, error) {
 	inserted := 0
 	for i, theme := range fallbackThemes {
 		id := fmt.Sprintf("canvas-%d", i+1)
 		if templateDeleted(st, id) {
+			log.Info("skipping blank canvas deleted by admin", "name", theme.name, "id", id)
 			continue
 		}
 		file := id + ".png"
@@ -307,6 +347,7 @@ func seedFallbacks(st *store.Store, dir string) (int, error) {
 		if err := writeFallback(path, theme); err != nil {
 			return inserted, err
 		}
+		log.Info("generated blank canvas template", "name", theme.name, "file", file, "width", 1200, "height", 900)
 		t := store.Template{
 			ID:        id,
 			Name:      theme.name,

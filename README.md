@@ -11,7 +11,7 @@ Built with **Go** (net/http + SQLite) and **React/TypeScript** (Vite + Tailwind 
 - **Template library** seeded from the Imgflip public API (72 classics, with Change My Mind aliased as Convince Me for search), plus handpicked additions (Facepalm, Young Thug at Computer, First World Problems, Elon Musk…) and generated blank canvases.
 - **Animated GIF templates** — generated animated canvases out of the box, GIF uploads, animated previews, and real animated GIF memes.
 - **Meme editor** with live canvas preview, top/bottom captions, drag-to-position captions with per-caption resizing, font scaling, text colours, outline/uppercase toggles, random caption generator, PNG/GIF export.
-- **Upload or paste (⌘V / Ctrl+V) images and GIFs** and immediately use them as templates; uploads join the community library.
+- **Add images via file upload, drag-and-drop, the Add image popup, or paste (⌘V / Ctrl+V)** — the clipboard image is used directly, no need to save it first. Uploads join the community library.
 - **Duplicate-proof uploads** — templates are fingerprinted with SHA-256 and a 256-bit perceptual dHash. The same file, a resized copy, or a re-encoded version all reuse the existing template instead of cluttering the library.
 - **Scoring** with optimistic up/down votes, one vote per browser per meme, vote toggling, hot/new/top sorting, and a full leaderboard.
 - **Site-wide search** across memes (titles, captions, creators, template names) and templates, with `/` as a keyboard shortcut.
@@ -34,7 +34,7 @@ make dev-web
 
 Open http://localhost:5173.
 
-The first backend start downloads ~72 template images from Imgflip and generates five animated GIF canvases. This takes a few seconds and only happens once per data directory.
+The first backend start downloads ~72 template images from Imgflip and generates five animated GIF canvases. This takes a few seconds and only happens once per data directory. Every download is logged to stdout with its name, URL, file, size and dimensions. If Imgflip is unreachable, the server logs each failure, generates blank canvas fallbacks, and retries the download on the next start.
 
 ## Production build
 

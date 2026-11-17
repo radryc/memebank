@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import type { Template } from '../lib/types'
 import { fetchTemplates, uploadTemplate } from '../lib/api'
 import { cn } from '../lib/utils'
 import { EmptyState } from '../components/UI'
-import { ImageIcon, Loader, Search, Sparkles, Upload } from '../components/Icons'
+import { ImageIcon, Loader, Plus, Search, Sparkles } from '../components/Icons'
+import AddImageDialog from '../components/AddImageDialog'
 import TemplateCard from '../components/TemplateCard'
 import { imageFromClipboard } from '../lib/clipboard'
 
@@ -28,7 +29,7 @@ export default function TemplatesPage() {
   const [query, setQuery] = useState(searchParams.get('q') ?? '')
   const [debouncedQuery, setDebouncedQuery] = useState('')
   const [uploading, setUploading] = useState(false)
-  const fileRef = useRef<HTMLInputElement>(null)
+  const [addOpen, setAddOpen] = useState(false)
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedQuery(query.trim()), 250)
@@ -75,14 +76,16 @@ export default function TemplatesPage() {
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Upload failed')
         setUploading(false)
-        if (fileRef.current) fileRef.current.value = ''
       }
     },
     [navigate],
   )
 
+  // Ctrl+V / ⌘V works anywhere on the wall. When the dialog is open it owns
+  // the paste event so the image is not uploaded twice.
   useEffect(() => {
     const onPaste = (event: ClipboardEvent) => {
+      if (addOpen) return
       const file = imageFromClipboard(event)
       if (!file) return
       event.preventDefault()
@@ -90,7 +93,7 @@ export default function TemplatesPage() {
     }
     window.addEventListener('paste', onPaste)
     return () => window.removeEventListener('paste', onPaste)
-  }, [handleUpload])
+  }, [addOpen, handleUpload])
 
   return (
     <div className="pb-10">
@@ -111,20 +114,13 @@ export default function TemplatesPage() {
 
         <button
           type="button"
-          onClick={() => fileRef.current?.click()}
+          onClick={() => setAddOpen(true)}
           disabled={uploading}
           className="btn-primary self-start py-3 sm:self-auto"
         >
-          {uploading ? <Loader className="size-4" /> : <Upload className="size-4" />}
-          {uploading ? 'Uploading…' : 'Upload GIF or image'}
+          {uploading ? <Loader className="size-4" /> : <Plus className="size-4" />}
+          {uploading ? 'Uploading…' : 'Add image'}
         </button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif"
-          className="hidden"
-          onChange={(event) => void handleUpload(event.target.files?.[0])}
-        />
       </div>
 
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -173,9 +169,9 @@ export default function TemplatesPage() {
           title="No templates here"
           description="Try a different search or upload your own picture to the library."
           action={
-            <button type="button" onClick={() => fileRef.current?.click()} className="btn-primary">
-              <Upload className="size-4" />
-              Upload an image
+            <button type="button" onClick={() => setAddOpen(true)} className="btn-primary">
+              <Plus className="size-4" />
+              Add an image
             </button>
           }
         />
@@ -188,7 +184,7 @@ export default function TemplatesPage() {
             </span>
             <span className="hidden items-center gap-1.5 sm:flex">
               <Sparkles className="size-3.5 text-acid-400" />
-              Click a card to use it — or paste an image with ⌘V / Ctrl+V
+              Click a card to use it — or hit Add image / ⌘V to upload or paste your own
             </span>
           </div>
 
@@ -199,6 +195,14 @@ export default function TemplatesPage() {
           </div>
         </>
       )}
+
+      <AddImageDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onFile={(file, source) => {
+          void handleUpload(file, source === 'paste' ? 'Pasted image' : undefined)
+        }}
+      />
     </div>
   )
 }

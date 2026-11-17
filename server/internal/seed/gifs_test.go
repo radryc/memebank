@@ -2,6 +2,8 @@ package seed
 
 import (
 	"image/gif"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,7 +19,8 @@ func TestSeedGeneratedGIFs(t *testing.T) {
 	defer st.Close()
 
 	dir := t.TempDir()
-	inserted, err := seedGeneratedGIFs(st, dir)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	inserted, err := seedGeneratedGIFs(st, dir, log)
 	if err != nil {
 		t.Fatalf("seed gifs: %v", err)
 	}

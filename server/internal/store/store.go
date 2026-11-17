@@ -204,6 +204,14 @@ func (s *Store) CountTemplates() (int, error) {
 	return n, err
 }
 
+// CountTemplatesBySource reports how many templates came from source, e.g.
+// "imgflip", "upload" or "generated".
+func (s *Store) CountTemplatesBySource(source string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM templates WHERE source = ?`, source).Scan(&n)
+	return n, err
+}
+
 // IsTemplateDeleted reports whether a template id was removed by an admin.
 // Seeders use this so deleted templates are not recreated on restart.
 func (s *Store) IsTemplateDeleted(id string) (bool, error) {

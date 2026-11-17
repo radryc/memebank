@@ -53,7 +53,7 @@ func ensureAnimatedTemplates(ctx context.Context, st *store.Store, dir string, l
 		}
 	}
 
-	inserted, err := seedGeneratedGIFs(st, dir)
+	inserted, err := seedGeneratedGIFs(st, dir, log)
 	if err != nil {
 		return err
 	}
@@ -61,7 +61,7 @@ func ensureAnimatedTemplates(ctx context.Context, st *store.Store, dir string, l
 	return nil
 }
 
-func seedGeneratedGIFs(st *store.Store, dir string) (int, error) {
+func seedGeneratedGIFs(st *store.Store, dir string, log *slog.Logger) (int, error) {
 	themes := []struct {
 		name    string
 		pal     color.Palette
@@ -140,6 +140,7 @@ func seedGeneratedGIFs(st *store.Store, dir string) (int, error) {
 		if err := writeAnimatedTemplate(path, theme.pal, theme.painter); err != nil {
 			return inserted, err
 		}
+		log.Info("generated animated gif template", "name", theme.name, "file", file, "width", gifWidth, "height", gifHeight)
 		t := store.Template{
 			ID:        id,
 			Name:      theme.name,
@@ -364,9 +365,10 @@ func seedGiphy(ctx context.Context, st *store.Store, dir, key string, log *slog.
 		}
 		file, width, height, err := downloadGIF(ctx, dir, gifURL)
 		if err != nil {
-			log.Debug("giphy gif download failed", "error", err)
+			log.Warn("giphy gif download failed", "name", name, "url", gifURL, "error", err)
 			continue
 		}
+		log.Info("giphy gif downloaded", "name", name, "file", file, "width", width, "height", height, "url", gifURL)
 		t := store.Template{
 			ID:        store.NewID(),
 			Name:      name,
@@ -379,6 +381,7 @@ func seedGiphy(ctx context.Context, st *store.Store, dir, key string, log *slog.
 		}
 		if err := st.CreateTemplate(t); err != nil {
 			os.Remove(filepath.Join(dir, file))
+			log.Warn("could not insert giphy template", "name", name, "error", err)
 			continue
 		}
 		inserted++
